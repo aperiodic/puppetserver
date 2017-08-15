@@ -3,131 +3,110 @@
             [puppetlabs.kitchensink.core :as ks]
             [puppetlabs.services.jruby.jruby-puppet-testutils :as jruby-testutils]
             [puppetlabs.services.jruby.puppet-environments :as puppet-env]
+            [puppetlabs.services.master.master-core :as mc]
             [me.raynes.fs :as fs]
             [cheshire.core :as cheshire]
+            [schema.core :as schema]
+            [schema.test :as schema-test]
             [puppetlabs.puppetserver.testutils :as testutils]
             [puppetlabs.trapperkeeper.app :as tk-app]
             [puppetlabs.trapperkeeper.testutils.bootstrap :as tk-bootstrap]))
 
-(defn gen-classes
-  [[mod-dir manifests]]
-  (let [manifest-dir (fs/file mod-dir "manifests")]
-    (ks/mkdirs! manifest-dir)
-    (doseq [manifest manifests]
-      (spit (fs/file manifest-dir (str manifest ".pp"))
-            (str
-              "class " manifest "($" manifest "_a, Integer $"
-              manifest "_b, String $" manifest
-              "_c = 'c default value') { }\n"
-              "class " manifest "2($" manifest "2_a, Integer $"
-              manifest "2_b, String $" manifest
-              "2_c = 'c default value') { }\n")))))
+(use-fixtures :once schema-test/validate-schemas)
+
+(def TaskOptions
+  {:name schema/Str
+   :module-name schema/Str
+   :metadata? schema/Bool
+   :number-of-files schema/Num})
+
+(defn make-task-dir
+  [env-dir mod-name]
+  (fs/file env-dir "modules" mod-name "tasks"))
+
+(defn gen-task
+  "Assumes tasks dir already exists -- generates a set of task files for a
+  single task."
+  [env-dir task]
+  (let [task-name (:name task)
+        extensions '(".rb" "" ".sh" ".exe" ".py")
+        task-dir (make-task-dir env-dir (:module-name task))]
+    (fs/mkdirs task-dir)
+    (when (:metadata? task)
+      (fs/create (fs/file task-dir (str task-name ".json"))))
+    (dotimes [n (:number-of-files task)]
+      (fs/create (fs/file task-dir (str task-name (nth extensions n ".rb")))))))
+
+(defn gen-tasks
+  "Tasks is a list of task maps, with keys:
+  :name String, file name of task
+  :module-name String, name of module task is in
+  :metadata? Boolean, whether to generate a metadata file
+  :number-of-files Number, how many executable files to generate for the task (0 or more)"
+  [env-dir tasks]
+  (dorun (map (partial gen-task env-dir) tasks)))
 
 (defn create-env
-  [[env-dir manifests]]
+  [env-dir tasks]
   (testutils/create-env-conf env-dir "")
-  (gen-classes [env-dir manifests]))
+  (gen-tasks env-dir tasks))
 
-(defn roundtrip-via-json
-  [obj]
-  (-> obj
-      (cheshire/generate-string)
-      (cheshire/parse-string)))
-
-(defn expected-class-info
-  [class]
-    {"name" class
-     "params" [{"name" (str class "_a")}
-               {"name" (str class "_b"),
-                "type" "Integer"}
-               {"name" (str class "_c"),
-                "type" "String",
-                "default_literal" "c default value"
-                "default_source" "'c default value'"}]})
-
-(defn expected-manifests-info
-  [manifests]
-  (into {}
-        (apply concat
-               (for [[dir names] manifests]
-                 (do
-                   (for [name names]
-                     [(.getAbsolutePath
-                        (fs/file dir
-                                 "manifests"
-                                 (str name ".pp")))
-                      {"classes"
-                       [(expected-class-info name)
-                        (expected-class-info
-                         (str name "2"))]}]))))))
+(defn expected-tasks-info
+  [tasks]
+  (->> tasks
+       (map (fn [{:keys [name module-name]}]
+              {:module {:name module-name}
+               :name (if (= "init" name)
+                       module-name
+                       (str module-name "::" name))}))))
 
 (deftest ^:integration all-tasks-test
-  (testing "all-tasks-listed"
+  (testing "all tasks listed"
     (let [code-dir (ks/temp-dir)
           conf-dir (ks/temp-dir)
           config (jruby-testutils/jruby-puppet-tk-config
-                  (jruby-testutils/jruby-puppet-config
-                   {:master-code-dir (.getAbsolutePath code-dir)
-                    :master-conf-dir (.getAbsolutePath conf-dir)}))]
+                   (jruby-testutils/jruby-puppet-config
+                     {:master-code-dir (.getAbsolutePath code-dir)
+                      :master-conf-dir (.getAbsolutePath conf-dir)}))]
 
       (tk-bootstrap/with-app-with-config
-       app
-       jruby-testutils/jruby-service-and-dependencies
-       config
-       (let [jruby-service (tk-app/get-service app :JRubyPuppetService)
-             instance (jruby-testutils/borrow-instance jruby-service :test)
-             jruby-puppet (:jruby-puppet instance)
-             env-registry (:environment-registry instance)
+        app
+        jruby-testutils/jruby-service-and-dependencies
+        config
+        (let [jruby-service (tk-app/get-service app :JRubyPuppetService)
+              instance (jruby-testutils/borrow-instance jruby-service :test)
+              jruby-puppet (:jruby-puppet instance)
+              env-registry (:environment-registry instance)
+              _ (testutils/create-file (fs/file conf-dir "puppet.conf")
+                                       "[main]\nenvironment_timeout=unlimited\nbasemodulepath=$codedir/modules\n")
 
-             _ (testutils/create-file (fs/file conf-dir "puppet.conf")
-                                      "[main]\nenvironment_timeout=unlimited\nbasemodulepath=$codedir/modules\n")
+              env-dir (fn [env-name]
+                        (fs/file code-dir "environments" env-name))
+              env-1-dir (env-dir "env1")
+              env-1-tasks [{:name "install"
+                            :module-name "apache"
+                            :metadata? true
+                            :number-of-files 2}
+                           {:name "init"
+                            :module-name "apache"
+                            :metadata? false
+                            :number-of-files 1}
+                           {:name "configure"
+                            :module-name "django"
+                            :metadata? true
+                            :number-of-files 0}]
 
-             env-dir (fn [env-name]
-                       (fs/file code-dir "environments" env-name))
-             env-1-dir (env-dir "env1")
-             env-1-dir-and-manifests [env-1-dir ["foo" "bar"]]
-             _ (create-env env-1-dir-and-manifests)
+              get-tasks (fn [env]
+                          (.getTasks jruby-puppet env))]
 
-             env-2-dir (env-dir "env2")
-             env-2-dir-and-manifests [env-2-dir ["baz" "bim" "boom"]]
-             _ (create-env env-2-dir-and-manifests)
-
-             env-1-mod-dir (fs/file env-1-dir "modules")
-             env-1-mod-1-dir-and-manifests [(fs/file env-1-mod-dir
-                                                     "envmod1")
-                                            ["envmod1baz" "envmod1bim"]]
-             _ (gen-classes env-1-mod-1-dir-and-manifests)
-             env-1-mod-2-dir (fs/file env-1-mod-dir "envmod2")
-             env-1-mod-2-dir-and-manifests [env-1-mod-2-dir
-                                            ["envmod2baz" "envmod2bim"]]
-             _ (gen-classes env-1-mod-2-dir-and-manifests)
-
-             env-3-dir-and-manifests [(env-dir "env3") ["dip" "dap" "dup"]]
-
-             base-mod-dir (fs/file code-dir "modules")
-             base-mod-1-and-manifests [(fs/file base-mod-dir "basemod1")
-                                       ["basemod1bap"]]
-             _ (gen-classes base-mod-1-and-manifests)
-
-             bogus-env-dir (env-dir "bogus-env")
-             _ (create-env [bogus-env-dir []])
-             _ (gen-classes [bogus-env-dir ["envbogus"]])
-             _ (gen-classes [(fs/file base-mod-dir "base-bogus") ["base-bogus1"]])
-
-             get-tasks (fn [env]
-                         (.getTasks jruby-puppet env))]
-         (try
-           (testing "initial parse"
-             (let [expected-envs-info {"env1" (expected-manifests-info
-                                               [env-1-dir-and-manifests
-                                                env-1-mod-1-dir-and-manifests
-                                                env-1-mod-2-dir-and-manifests
-                                                base-mod-1-and-manifests])
-                                       "env2" (expected-manifests-info
-                                               [env-2-dir-and-manifests
-                                                base-mod-1-and-manifests])}]
-               (is (= (expected-envs-info "env1")
-                      (get-tasks "env1"))
-                   "Unexpected info retrieved for 'env1'")))
-           (finally
-             (jruby-testutils/return-instance jruby-service instance :test))))))))
+          (try (create-env env-1-dir env-1-tasks)
+               (testing "task retrieval"
+                 (is (= (-> env-1-tasks
+                            expected-tasks-info
+                            set)
+                        (-> (get-tasks "env1")
+                            mc/sort-nested-info-maps
+                            set))
+                     "Unexpected info retrieved for 'env1'"))
+               (finally
+                 (jruby-testutils/return-instance jruby-service instance :test))))))))
