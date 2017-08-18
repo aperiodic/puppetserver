@@ -180,19 +180,26 @@
   [foo-pp-contents]
   (write-pp-file foo-pp-contents "foo"))
 
-(schema/defn ^:always-validate write-tasks-files :- schema/Str
-  [module-name :- schema/Str
-   task-name :- schema/Str
-   task-file-contents :- schema/Str]
-  (let [metadata-contents {"description" "This is a description. It describes a thing."}
-        module-dir (create-module module-name {})
-        tasks-dir (fs/file module-dir "tasks")
-        metadata-file-path (fs/file tasks-dir task-name ".json")]
-    (create-file metadata-file-path
-                 (json/encode metadata-contents))
-    (create-file (fs/file tasks-dir task-name ".sh")
-                 task-file-contents)
-    (.getCanonicalPath metadata-file-path)))
+(schema/defn ^:always-validate write-task-files :- schema/Str
+  "Given an environment, the task's module's name, the
+  (module name and task
+  name) and the contents of the payload file, write both "
+  ([module-name :- schema/Str
+    task-name :- schema/Str
+    task-file-contents :- schema/Str]
+   (write-task-files module-name task-name task-file-contents "production"))
+  ([module-name :- schema/Str
+    task-name :- schema/Str
+    task-file-contents :- schema/Str
+    environment-name :- schema/Str]
+   (let [metadata-contents {"description" "This is a description. It describes a thing."}
+         module-dir (create-module module-name {:env-name environment-name})
+         tasks-dir (fs/file module-dir "tasks")
+         payload-file (fs/file tasks-dir (str task-name ".sh"))
+         metadata-file (fs/file tasks-dir (str task-name ".json"))]
+     (create-file metadata-file (json/encode metadata-contents))
+     (create-file payload-file task-file-contents)
+     (.getCanonicalPath metadata-file))))
 
 (defn create-env-conf
   [env-dir content]
