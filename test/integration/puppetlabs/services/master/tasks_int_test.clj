@@ -8,7 +8,7 @@
             [me.raynes.fs :as fs]))
 
 (def test-resources-dir
-  "./dev-resources/puppetlabs/services/master/environment_classes_int_test")
+  "./dev-resources/puppetlabs/services/master/tasks_int_test")
 
 (defn purge-env-dir
   []
