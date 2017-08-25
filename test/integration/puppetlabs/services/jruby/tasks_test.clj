@@ -100,12 +100,12 @@
 
           (try (create-env env-1-dir env-1-tasks)
                (testing "for environment that does exist"
-                 (is (= (-> env-1-tasks
+                 (is (= (->> env-1-tasks
                             expected-tasks-info
-                            set)
-                        (-> (get-tasks "env1")
-                            mc/sort-nested-info-maps
-                            set))
+                            (sort-by :name))
+                        (->> (get-tasks "env1")
+                             mc/sort-nested-info-maps
+                             (sort-by :name)))
                      "Unexpected info retrieved for 'env1'"))
 
                (testing "for environment that does not exist"
