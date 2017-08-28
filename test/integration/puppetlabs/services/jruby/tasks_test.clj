@@ -128,3 +128,76 @@
 
                (finally
                  (jruby-testutils/return-instance jruby-service instance :test))))))))
+
+(deftest ^:integration task-info-test
+  (testing "getting info for a specific task"
+    (let [code-dir (ks/temp-dir)
+          conf-dir (ks/temp-dir)]
+      (testutils/create-file (fs/file conf-dir "puppet.conf") puppet-conf-file-contents)
+
+      (tk-bootstrap/with-app-with-config
+        app
+        jruby-testutils/jruby-service-and-dependencies
+        (puppet-tk-config code-dir conf-dir)
+        (let [jruby-service (tk-app/get-service app :JRubyPuppetService)
+              instance (jruby-testutils/borrow-instance jruby-service :test)
+              tasks [{:name "install_mods"
+                      :module-name "apache"
+                      :metadata? true
+                      :number-of-files 1}
+                     {:name "init"
+                      :module-name "apache"
+                      :metadata? false
+                      :number-of-files 1}
+                     {:name "about"
+                      :module-name "apache"
+                      :metadata? true
+                      :number-of-files 0}]]
+
+          (try (create-env (env-dir code-dir "tasks-info") tasks)
+
+              (testing "when the environment exists"
+                (testing "and the module exists"
+                  (testing "and the task exists"
+                    (testing "with metadata and payload files"
+                      (let [expected-info {:metadata {}
+                                           :code_id nil
+                                           :files [{:filename "install_mods.rb"
+                                                    :sha256 "0xdecadecafe"
+                                                    :size-bytes 0
+                                                    :uri {:path "/puppet/v3/file_content/tasks/apache/install_mods.rb"
+                                                          :params {:environment "production"
+                                                                   :code_id nil}}}]}])
+                      (is (= expected-info
+                             (.getTaskInfo jruby-puppet "production" "apache" "install_mods"))))
+
+                    (testing "without a metadata file"
+                      (let [expected-info {:metadata {}
+                                           :code_id nil
+                                           :files [{:filename "init.rb"
+                                                    :sha256 "0xdefaceddad"
+                                                    :size-bytes 0
+                                                    :uri {:path "/puppet/v3/file_content/tasks/apache/init.rb"
+                                                          :params {:environment "production"
+                                                                   :code_id nil}}}]}]
+                        (is (= expected-info
+                             (.getTaskInfo jruby-puppet "production" "apache" "init")))))
+
+                    (testing "with no payload files"
+                      (let [expected-info {:metadata {}
+                                           :code_id nil
+                                           :files []}]
+                        (is (= expected-info
+                               (.getTaskInfo jruby-puppet "production" "apache" "about"))))))
+
+                  (testing "but the task doesn't exist"
+                    (is (nil? (.getTaskInfo jruby-puppet "production" "apache" "refuel")))))
+
+                (testing "but the module doesn't exist"
+                  (is (nil? (.getTaskInfo jruby-puppet "production" "mahjoule" "heat")))))
+
+              (testing "when the environment doesn't exist"
+                (is (nil? (.getTaskInfo jruby-puppet "DNE" "module" "missing"))))
+
+              (finally
+                (jruby-testutils/return-instance jruby-service instance :test))))))))
