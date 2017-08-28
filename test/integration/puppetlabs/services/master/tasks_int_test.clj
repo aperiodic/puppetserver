@@ -28,18 +28,14 @@
                   (finally
                     (purge-env-dir)))))
 
+(def request-as-text-with-ssl (assoc testutils/ssl-request-options :as :text))
+
 (defn get-all-tasks
   [env-name]
-  (let [url (str "https://localhost:8140/puppet/v3/"
-                 "tasks")
-        url (if env-name
-              (str url "?environment=" env-name)
-              url)]
+  (let [url (str "https://localhost:8140/puppet/v3/tasks"
+                 (if env-name (str "?environment=" env-name)))]
     (try
-      (http-client/get url
-        (merge
-          testutils/ssl-request-options
-          {:as :text}))
+      (http-client/get url request-as-text-with-ssl)
       (catch Exception e
         (throw (Exception. "tasks http get failed" e))))))
 
@@ -47,23 +43,30 @@
   [response]
   (-> response :body cheshire/parse-string))
 
+(defn sort-tasks
+  [tasks]
+  (sort-by #(get % "name") tasks))
+
+(def puppet-config
+  (-> (bootstrap/load-dev-config-with-overrides {:jruby-puppet {:max-active-instances 1}})
+      (ks/dissoc-in [:jruby-puppet
+                     :environment-class-cache-enabled])))
+
 (deftest ^:integration all-tasks-with-env
-  (testing "full stack smoke test"
+  (testing "full stack tasks listing smoke test"
     (bootstrap/with-puppetserver-running-with-config
       app
-      (-> {:jruby-puppet {:max-active-instances 1}}
-          (bootstrap/load-dev-config-with-overrides)
-          (ks/dissoc-in [:jruby-puppet
-                         :environment-class-cache-enabled]))
-      (let [foo-file (testutils/write-tasks-files "apache" "announce" "echo 'Hi!'")
-            bar-file (testutils/write-tasks-files "graphite" "install" "wheeee")
-            expected-response '({"name" "apache::announce"
-                                 "environment" [{"name" "production"
-                                                "code_id" nil}]}
-                                {"name" "graphite::install"
-                                 "environment" [{"name" "production"
-                                                "code_id" nil}]})
-            response (get-all-tasks "production")]
+      puppet-config
+      (do
+        (testutils/write-tasks-files "apache" "announce" "echo 'Hi!'")
+        (testutils/write-tasks-files "graphite" "install" "wheeee")
+        (let [expected-response '({"name" "apache::announce"
+                                   "environment" [{"name" "production"
+                                                   "code_id" nil}]}
+                                  {"name" "graphite::install"
+                                   "environment" [{"name" "production"
+                                                   "code_id" nil}]})
+              response (get-all-tasks "production")]
         (testing "a successful status code is returned"
           (is (= 200 (:status response))
               (str
