@@ -21,9 +21,14 @@
    :metadata? schema/Bool
    :number-of-files (schema/pred #(<= % 5))})
 
-(schema/defn gen-task
-  "Assumes tasks dir already exists -- generates a set of task files for a
-  single task."
+(schema/defn gen-empty-task
+  "Assumes tasks dir already exists -- generates a set of task files for
+  a single task. All the generated payload files are empty, and all generated
+  metadata files contain the empty JSON object.
+
+  This function exists in addition to the tasks-generating utilities in
+  puppetlabs.puppetserver.testutils primarily because those other utilites only
+  generate things inside a hardcoded conf-dir at 'target/master-conf'."
   [env-dir :- (schema/cond-pre File schema/Str)
    task :- TaskOptions]
   (let [task-name (:name task)
@@ -31,23 +36,33 @@
         task-dir (fs/file env-dir "modules" (:module-name task) "tasks")]
     (fs/mkdirs task-dir)
     (when (:metadata? task)
-      (fs/create (fs/file task-dir (str task-name ".json"))))
+      (spit (fs/file task-dir (str task-name ".json")) "{}"))
     (dotimes [n (:number-of-files task)]
       (fs/create (fs/file task-dir (str task-name (nth extensions n ".rb")))))))
 
-(defn gen-tasks
+(defn gen-empty-tasks
   "Tasks is a list of task maps, with keys:
   :name String, file name of task
   :module-name String, name of module task is in
   :metadata? Boolean, whether to generate a metadata file
-  :number-of-files Number, how many executable files to generate for the task (0 or more)"
+  :number-of-files Number, how many executable files to generate for the task (0 or more)
+
+  All generated files are empty, except metadata files, which contain the empty JSON object.
+
+  This function exists in addition to the tasks-generating utilities in
+  puppetlabs.puppetserver.testutils primarily because those other utilites only
+  generate things inside a hardcoded conf-dir at 'target/master-conf'."
   [env-dir tasks]
-  (dorun (map (partial gen-task env-dir) tasks)))
+  (dorun (map (partial gen-empty-task env-dir) tasks)))
 
 (defn create-env
   [env-dir tasks]
   (testutils/create-env-conf env-dir "")
-  (gen-tasks env-dir tasks))
+  (gen-empty-tasks env-dir tasks))
+
+(defn env-dir
+  [code-dir env-name]
+  (fs/file code-dir "environments" env-name))
 
 (defn expected-tasks-info
   [tasks]
@@ -58,30 +73,30 @@
                   (str module-name "::" name))})
        tasks))
 
+(schema/defn puppet-tk-config
+  [code-dir :- File, conf-dir :- File]
+  (jruby-testutils/jruby-puppet-tk-config
+    (jruby-testutils/jruby-puppet-config
+      {:master-code-dir (.getAbsolutePath code-dir)
+       :master-conf-dir (.getAbsolutePath conf-dir)})))
+
+(def puppet-conf-file-contents
+  "[main]\nenvironment_timeout=unlimited\nbasemodulepath=$codedir/modules\n")
+
 (deftest ^:integration all-tasks-test
   (testing "requesting all tasks"
     (let [code-dir (ks/temp-dir)
-          conf-dir (ks/temp-dir)
-          config (jruby-testutils/jruby-puppet-tk-config
-                   (jruby-testutils/jruby-puppet-config
-                     {:master-code-dir (.getAbsolutePath code-dir)
-                      :master-conf-dir (.getAbsolutePath conf-dir)}))]
-
-      (testutils/create-file (fs/file conf-dir "puppet.conf")
-                             "[main]\nenvironment_timeout=unlimited\nbasemodulepath=$codedir/modules\n")
+          conf-dir (ks/temp-dir)]
+      (testutils/create-file (fs/file conf-dir "puppet.conf") puppet-conf-file-contents)
 
       (tk-bootstrap/with-app-with-config
         app
         jruby-testutils/jruby-service-and-dependencies
-        config
+        (puppet-tk-config code-dir conf-dir)
         (let [jruby-service (tk-app/get-service app :JRubyPuppetService)
               instance (jruby-testutils/borrow-instance jruby-service :test)
               jruby-puppet (:jruby-puppet instance)
-              env-registry (:environment-registry instance)
-
-              env-dir (fn [env-name]
-                        (fs/file code-dir "environments" env-name))
-              env-1-dir (env-dir "env1")
+              env-1-dir (env-dir code-dir "env1")
               env-1-tasks [{:name "install"
                             :module-name "apache"
                             :metadata? true
