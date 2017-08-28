@@ -1,5 +1,6 @@
 (ns puppetlabs.services.master.tasks-int-test
-  (:require [clojure.test :refer :all]
+  (:require [clojure.string :as str]
+            [clojure.test :refer :all]
             [puppetlabs.http.client.sync :as http-client]
             [puppetlabs.kitchensink.core :as ks]
             [puppetlabs.puppetserver.bootstrap-testutils :as bootstrap]
@@ -39,6 +40,17 @@
       (catch Exception e
         (throw (Exception. "tasks http get failed" e))))))
 
+(defn get-task-info
+  "task-name is the task's full name, e.g. 'apache::reboot'."
+  [env-name full-task-name]
+  (let [[module-name task-name]  (str/split full-task-name #"::")
+        url (str "https://localhost:8140/puppet/v3/tasks/" module-name "/" task-name
+                 (if env-name (str "?environment=" env-name)))]
+    (try
+      (http-client/get url request-as-text-with-ssl)
+      (catch Exception e
+        (throw (Exception. "task info http get failed" e))))))
+
 (defn parse-response
   [response]
   (-> response :body cheshire/parse-string))
@@ -67,11 +79,37 @@
                                    "environment" [{"name" "production"
                                                    "code_id" nil}]})
               response (get-all-tasks "production")]
+          (testing "a successful status code is returned"
+            (is (= 200 (:status response))
+                (str
+                  "unexpected status code for response, response: "
+                  (ks/pprint-to-string response))))
+          (testing "the expected response body is returned"
+            (is (= expected-response
+                   (sort-tasks (parse-response response))))))))))
+
+(deftest ^:integration task-info
+  (testing "full stack task metadata smoke test"
+    (bootstrap/with-puppetserver-running-with-config
+      app
+      puppet-config
+      (let [metadata {"description" "This is a test task"
+                      "output" "'Hello, world!'"}
+            _ (testutils/write-tasks-files "shell" "poc" "echo 'Hello, world!'" metadata)
+            response (get-task-info "production" "shell::poc")
+            code (:status response)]
         (testing "a successful status code is returned"
-          (is (= 200 (:status response))
-              (str
-                "unexpected status code for response, response: "
-                (ks/pprint-to-string response))))
+          (is (= 200 code)
+              (str "unexpected status code " code " for response: "
+                   (ks/pprint-to-string response))))
+
         (testing "the expected response body is returned"
-          (is (= expected-response
-                 (parse-response response))))))))
+          (let [expected-response {"metadata" metadata
+                                   "code_id" nil
+                                   "files" [{"filename" "poc.sh"
+                                             "sha256" "0xdecadecafaded"
+                                             "size_bytes" 21
+                                             "uri" {"path" "/puppet/v3/file_contents/tasks/shell/poc.sh"
+                                                    "params" {"environment" "production"
+                                                              "code_id" nil}}}]}]
+            (is (= expected-response (parse-response response)))))))))
